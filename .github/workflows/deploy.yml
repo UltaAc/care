@@ -35,7 +35,7 @@ jobs:
   build:
     needs: test
     name: Build & Push to container registries
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
 
@@ -88,7 +88,7 @@ jobs:
         with:
           context: .
           file: docker/prod.Dockerfile
-          push: true
+          push: false
           provenance: false
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
@@ -98,14 +98,6 @@ jobs:
           cache-from: type=local,src=/tmp/.buildx-cache
           cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
 
-      - name: Create Sentry release
-        uses: getsentry/action-release@v1
-        env:
-          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
-          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
-        with:
-          version: ${{ github.sha }}
       - name: Update cache
         if: always() # Run even if previous steps fail
         run: |
@@ -113,86 +105,3 @@ jobs:
             rm -rf /tmp/.buildx-cache
             mv /tmp/.buildx-cache-new /tmp/.buildx-cache
           fi
-
-  notify-release:
-    needs: build
-    if: startsWith(github.event.ref, 'refs/tags/v')
-    name: Notify release
-    runs-on: ubuntu-latest
-    steps:
-      - name: Notify release
-        run: |
-          echo "Release ${{ github.sha }} is ready to be deployed to production"
-
-  deploy-staging-egov:
-    needs: build
-    if: github.ref == 'refs/heads/develop'
-    name: Deploy to ECS API Egov
-    runs-on: ubuntu-latest
-    environment:
-      name: Staging-egov
-      url: https://careapi.ohc.network
-    steps:
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_DEFAULT_REGION }}
-
-      - name: IMAGE Tagging
-        env:
-          ECR_REGISTRY: ghcr.io/${{ github.repository }}
-          IMAGE_TAG: latest-${{ github.run_number }}
-        run: echo "IMAGE_VALUE=`echo ghcr.io/${{ github.repository }}:$IMAGE_TAG`" >> $GITHUB_ENV
-
-      - name: Download task definition for Celery Service
-        run: |
-          set -e
-          if aws ecs describe-task-definition --task-definition ${{ env.ECS_SERVICE_CELERY }} --query taskDefinition > celery-task-definition.json; then
-            echo "Successfully downloaded Celery task definition."
-          else
-            echo "Failed to download Celery task definition." >&2
-            exit 1
-          fi
-
-      - name: Fill in the new image ID in the Celery task definition
-        id: celery-task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition: celery-task-definition.json
-          container-name: ${{ env.CONTAINER_NAME_WORKER }}
-          image: ${{ env.IMAGE_VALUE }}
-
-      - name: Deploy Celery task definition
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
-        with:
-          task-definition: ${{ steps.celery-task-def.outputs.task-definition }}
-          service: ${{ env.ECS_SERVICE_CELERY }}
-          cluster: ${{ env.ECS_CLUSTER }}
-          wait-for-service-stability: true
-
-      - name: Download task definition for Backend Service
-        run: |
-          set -e
-          if aws ecs describe-task-definition --task-definition ${{ env.ECS_SERVICE_BACKEND }} --query taskDefinition > backend-task-definition.json; then
-            echo "Successfully downloaded Backend task definition."
-          else
-            echo "Failed to download Backend task definition." >&2
-            exit 1
-          fi
-      - name: Fill in the new image ID in the Backend task definition
-        id: backend-task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition: backend-task-definition.json
-          container-name: ${{ env.CONTAINER_NAME_BACKEND }}
-          image: ${{ env.IMAGE_VALUE }}
-
-      - name: Deploy Backend task definition
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
-        with:
-          task-definition: ${{ steps.backend-task-def.outputs.task-definition }}
-          service: ${{ env.ECS_SERVICE_BACKEND }}
-          cluster: ${{ env.ECS_CLUSTER }}
-          wait-for-service-stability: true
